@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8"/>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; }
+    h2 { margin: 0; }
+    .muted { color: #666; }
+    .box { border: 1px solid #ddd; padding: 10px; margin-top: 10px; }
+    table { width:100%; border-collapse: collapse; margin-top: 8px; }
+    td, th { border: 1px solid #ddd; padding: 8px; }
+    .right { text-align:right; }
+    .totals p { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <h2>Proposta de Automação</h2>
+  <div class="muted">{{ company_name }}</div>
+
+  <div class="box">
+    <b>Cliente</b><br/>
+    Nome: {{ client.name }}<br/>
+    E-mail: {{ client.email }}<br/>
+    Telefone: {{ client.phone }}<br/>
+    {% if client.address %}Endereço: {{ client.address }}<br/>{% endif %}
+    <span class="muted">Vendedor (WhatsApp): {{ seller_phone }}</span>
+  </div>
+
+  {% if notes %}
+  <div class="box">
+    <b>Observações da vistoria</b><br/>
+    {{ notes }}
+  </div>
+  {% endif %}
+
+  <div class="box">
+    <b>Materiais</b>
+    <table>
+      <tr>
+        <th>Item</th>
+        <th class="right">Qtd</th>
+        <th class="right">Valor unit.</th>
+        <th class="right">Total materiais</th>
+      </tr>
+      {% for row in breakdown %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td class="right">{{ row.qty }}</td>
+        <td class="right">R$ {{ "%.2f"|format(row.unit_price) }}</td>
+        <td class="right">R$ {{ "%.2f"|format(row.material) }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <div class="totals">
+      <p><b>Total materiais:</b> R$ {{ "%.2f"|format(totals.material_total) }}</p>
+      <p><b>Mão de obra:</b> R$ {{ "%.2f"|format(totals.labor_total) }}</p>
+      <p style="font-size: 14px;"><b>Valor total:</b> R$ {{ "%.2f"|format(totals.grand_total) }}</p>
+    </div>
+  </div>
+
+  <div class="box">
+    <b>Condições de pagamento</b>
+    <ul>
+      <li><b>À vista (10% de desconto):</b> R$ {{ "%.2f"|format(totals.cash_total) }}</li>
+      <li><b>Cartão:</b> {{ totals.card_installments }}x sem juros de <b>R$ {{ "%.2f"|format(totals.card_installment_value) }}</b></li>
+    </ul>
+    <div class="muted">*Valores calculados automaticamente com base no escopo informado.</div>
+  </div>
+</body>
+</html>

@@ -644,7 +644,6 @@ async def twilio_whatsapp(request: Request):
     print("TWILIO_FORM:", dict(form))
     wa_from = form.get("From", "")  # ex: "whatsapp:+5567..."
     body = _normalize_text(form.get("Body", ""))
-    selected = extract_selection(dict(form))
 
     s = _get_session(wa_from)
     draft = s["draft"]
@@ -732,7 +731,41 @@ async def twilio_whatsapp(request: Request):
 
     if state == "pick_items_list":
         payload = draft
+        cmd = body.strip().lower()
 
+        if cmd == "pronto":
+            cmd = "finalizar"
+
+        # 1) Trata quick replies primeiro
+        if "finalizar" in cmd:
+            if not payload.get("items_selected"):
+                resp.message("Selecione pelo menos 1 item na lista.")
+                wa_send_list_items(wa_from)
+                return PlainTextResponse(str(resp), media_type="application/xml")
+            payload["qty_index"] = 0
+            payload["selected_keys"] = list(payload.get("items_selected", []))
+            _set_state(s, "ask_qty")
+            save_session(wa_from, "ask_qty", payload)
+            k = payload["items_selected"][0]
+            q = f"{quantifier_for_item(k)} *{LABEL_BY_KEY.get(k, k)}*?"
+            resp.message(q)
+            return PlainTextResponse(str(resp), media_type="application/xml")
+
+        if "adicionar" in cmd or cmd == "mais":
+            wa_send_list_items(wa_from)
+            return PlainTextResponse(str(resp), media_type="application/xml")
+
+        if "limpar" in cmd:
+            payload["items_selected"] = []
+            payload["selected_keys"] = []
+            payload["quantities"] = {}
+            save_session(wa_from, "pick_items_list", payload)
+            wa_send_list_items(wa_from)
+            resp.message("Carrinho limpo. Selecione os itens novamente.")
+            return PlainTextResponse(str(resp), media_type="application/xml")
+
+        # 2) Agora tenta selecao da lista
+        selected = extract_selection(dict(form))
         if selected:
             item_key = selected
             if item_key.isdigit():
@@ -757,35 +790,9 @@ async def twilio_whatsapp(request: Request):
             wa_send_pick_actions(wa_from)
             return PlainTextResponse(str(resp), media_type="application/xml")
 
-        if cmd in {"finalizar selecao", "finalizar seleção", "finalizar", "✅ finalizar seleção", "pronto"}:
-            if not payload.get("items_selected"):
-                resp.message("Selecione pelo menos 1 item.")
-                wa_send_list_items(wa_from)
-                return PlainTextResponse(str(resp), media_type="application/xml")
-            payload["qty_index"] = 0
-            payload["selected_keys"] = list(payload.get("items_selected", []))
-            _set_state(s, "ask_qty")
-            save_session(wa_from, "ask_qty", payload)
-            k = payload["items_selected"][0]
-            q = f"{quantifier_for_item(k)} *{LABEL_BY_KEY.get(k, k)}*?"
-            resp.message(q)
-            return PlainTextResponse(str(resp), media_type="application/xml")
-
-        if cmd in {"adicionar mais itens", "mais", "➕ adicionar mais itens"}:
-            wa_send_list_items(wa_from)
-            resp.message("Ok. Selecione mais itens na lista.")
-            return PlainTextResponse(str(resp), media_type="application/xml")
-
-        if cmd in {"limpar selecao", "limpar seleção", "limpar", "🧹 limpar seleção"}:
-            payload["items_selected"] = []
-            payload["selected_keys"] = []
-            payload["quantities"] = {}
-            save_session(wa_from, "pick_items_list", payload)
-            wa_send_list_items(wa_from)
-            resp.message("Carrinho limpo. Selecione os itens novamente.")
-            return PlainTextResponse(str(resp), media_type="application/xml")
-
+        # 3) fallback
         resp.message("Use a lista para selecionar itens.")
+        wa_send_list_items(wa_from)
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     if state in {"QTY", "ask_qty"}:

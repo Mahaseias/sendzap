@@ -45,19 +45,19 @@ _sessions: Dict[str, Dict[str, Any]] = {}  # key: seller_phone (whatsapp:+55...)
 
 
 # Catalogo MVP do novo fluxo WhatsApp
-CATALOG = [
-    {"key": "lampadas", "label": "Lampadas"},
-    {"key": "interruptores", "label": "Interruptores"},
-    {"key": "sensores", "label": "Sensores"},
-    {"key": "modulos", "label": "Modulos"},
-    {"key": "contatoras", "label": "Contatoras"},
-    {"key": "irrigacao", "label": "Irrigacao"},
-    {"key": "central_comando", "label": "Central de comando"},
-    {"key": "comando_voz", "label": "Comando por voz"},
-]
+CATALOG: Dict[str, Dict[str, str]] = {
+    "lampadas": {"label": "lâmpadas", "gender": "f"},
+    "sensores": {"label": "sensores", "gender": "m"},
+    "interruptores": {"label": "interruptores", "gender": "m"},
+    "modulos": {"label": "módulos", "gender": "m"},
+    "contatoras": {"label": "contatoras", "gender": "f"},
+    "irrigacao": {"label": "irrigação", "gender": "f"},
+    "central": {"label": "central de comando", "gender": "f"},
+    "voz": {"label": "comando por voz", "gender": "m"},
+}
 
-KEY_BY_INDEX = {i + 1: item["key"] for i, item in enumerate(CATALOG)}
-LABEL_BY_KEY = {item["key"]: item["label"] for item in CATALOG}
+KEY_BY_INDEX = {i + 1: key for i, key in enumerate(CATALOG.keys())}
+LABEL_BY_KEY = {key: item["label"] for key, item in CATALOG.items()}
 
 # Mapeia catalogo do WhatsApp para SKUs usados no quote atual
 CATALOG_TO_SKU = {
@@ -67,8 +67,8 @@ CATALOG_TO_SKU = {
     "modulos": "relay_2ch",
     "contatoras": "relay_4ch",
     "irrigacao": "smart_plug",
-    "central_comando": "relay_1ch",
-    "comando_voz": "ir_tv",
+    "central": "relay_1ch",
+    "voz": "ir_tv",
 }
 
 
@@ -168,13 +168,18 @@ def _is_email(email: str) -> bool:
     return bool(re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$", email))
 
 
+def quantifier_for_item(item_key: str) -> str:
+    gender = (CATALOG.get(item_key) or {}).get("gender", "m")
+    return "Quantas" if gender == "f" else "Quantos"
+
+
 def _render_catalog_menu() -> str:
     lines = [
         "Selecione os itens digitando os numeros separados por virgula.",
         "Exemplo: 1,3,8",
         "",
     ]
-    for i, item in enumerate(CATALOG, start=1):
+    for i, (_, item) in enumerate(CATALOG.items(), start=1):
         lines.append(f"{i}) {item['label']}")
     lines.append("")
     lines.append("Comandos: cancelar | menu")
@@ -602,7 +607,8 @@ async def twilio_whatsapp(request: Request):
                     k = _next_qty_key(draft)
                     if k:
                         _set_state(s, "QTY")
-                        resp.message(f"Quantas {LABEL_BY_KEY.get(k, k)}?")
+                        q = f"{quantifier_for_item(k)} {CATALOG[k]['label']}?"
+                        resp.message(q)
                     else:
                         _set_state(s, "SUMMARY")
                         resp.message(_summary(draft))
@@ -649,7 +655,8 @@ async def twilio_whatsapp(request: Request):
         s["updated_at"] = _now()
         _set_state(s, "QTY")
         k = _next_qty_key(draft)
-        resp.message(f"Perfeito. Quantas {LABEL_BY_KEY.get(k, k)}?")
+        q = f"{quantifier_for_item(k)} {CATALOG[k]['label']}?"
+        resp.message(f"Perfeito. {q}")
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     if state == "QTY":
@@ -661,7 +668,8 @@ async def twilio_whatsapp(request: Request):
 
         m = re.findall(r"\d+", incoming)
         if not m:
-            resp.message(f"Digite apenas um numero.\nQuantas {LABEL_BY_KEY.get(k, k)}?")
+            q = f"{quantifier_for_item(k)} {CATALOG[k]['label']}?"
+            resp.message(f"Digite apenas um numero.\n{q}")
             return PlainTextResponse(str(resp), media_type="application/xml")
         q = int(m[0])
         if q < 0 or q > 100000:
@@ -676,7 +684,8 @@ async def twilio_whatsapp(request: Request):
         s["updated_at"] = _now()
         nextk = _next_qty_key(draft)
         if nextk:
-            resp.message(f"Quantas {LABEL_BY_KEY.get(nextk, nextk)}?")
+            q = f"{quantifier_for_item(nextk)} {CATALOG[nextk]['label']}?"
+            resp.message(q)
         else:
             _set_state(s, "SUMMARY")
             resp.message(_summary(draft))

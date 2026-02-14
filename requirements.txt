@@ -7,3 +7,5 @@ email-validator==2.2.0
 reportlab==4.2.2
 twilio==9.2.3
 python-multipart==0.0.9
+sqlalchemy==2.0.32
+psycopg[binary]==3.2.1

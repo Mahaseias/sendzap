@@ -10,8 +10,10 @@ import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import text
 from urllib.parse import parse_qs
 from twilio.twiml.messaging_response import MessagingResponse
+from db import SessionLocal
 
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -241,6 +243,31 @@ def resolve_seller_email(seller_phone: str) -> Optional[str]:
         return seller.get("email")
     except Exception:
         return None
+
+
+def load_session(wa_from: str):
+    with SessionLocal() as db:
+        row = db.execute(text("select state, payload from sessions where wa_from=:w"), {"w": wa_from}).fetchone()
+        if not row:
+            return None
+        return {"state": row[0], "payload": row[1]}
+
+
+def save_session(wa_from: str, state: str, payload: dict):
+    with SessionLocal() as db:
+        db.execute(text("""
+            insert into sessions(wa_from, state, payload, updated_at)
+            values (:w,:s,:p, now())
+            on conflict (wa_from) do update
+            set state=excluded.state, payload=excluded.payload, updated_at=now()
+        """), {"w": wa_from, "s": state, "p": json.dumps(payload)})
+        db.commit()
+
+
+def clear_session(wa_from: str):
+    with SessionLocal() as db:
+        db.execute(text("delete from sessions where wa_from=:w"), {"w": wa_from})
+        db.commit()
 
 
 WIZARD_ITEMS_ORDER = [
@@ -492,6 +519,12 @@ class FlowSubmit(BaseModel):
 # FASTAPI APP
 # =========================
 app = FastAPI(title="Sendzap - Propostas Automação")
+
+
+@app.on_event("startup")
+def startup():
+    from db import init_db
+    init_db()
 
 
 @app.get("/")

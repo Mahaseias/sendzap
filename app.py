@@ -12,6 +12,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
 from urllib.parse import parse_qs
+from twilio.rest import Client as TwilioRestClient
 from twilio.twiml.messaging_response import MessagingResponse
 from db import SessionLocal
 
@@ -72,6 +73,37 @@ CATALOG_TO_SKU = {
     "central": "relay_1ch",
     "voz": "ir_tv",
 }
+
+
+_twilio = TwilioRestClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+
+
+def wa_send_text(to: str, text: str):
+    _twilio.messages.create(
+        from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+        to=to,
+        body=text
+    )
+
+
+def wa_send_list_items(to: str):
+    _twilio.messages.create(
+        from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+        to=to,
+        content_sid=os.getenv("CONTENT_SID_LIST_ITEMS"),
+    )
+
+
+def extract_list_selection(form: dict) -> str | None:
+    """
+    Twilio pode mandar a selecao da lista em campos diferentes dependendo do template/feature.
+    A gente tenta os mais comuns. Voce vai ver qual aparece no log.
+    """
+    for k in ("ListItemId", "list_item_id", "SelectedItemId", "selected_item_id", "ButtonPayload"):
+        v = form.get(k)
+        if v:
+            return str(v).strip()
+    return None
 
 
 # =========================
@@ -593,18 +625,20 @@ async def twilio_whatsapp(request: Request):
     Responde TwiML (MessagingResponse).
     """
     form = await request.form()
-    incoming = _normalize_text(form.get("Body", ""))
-    seller = form.get("From", "")  # ex: "whatsapp:+5567..."
+    wa_from = form.get("From", "")  # ex: "whatsapp:+5567..."
+    body = _normalize_text(form.get("Body", ""))
+    selected = extract_list_selection(dict(form))
 
-    s = _get_session(seller)
+    s = _get_session(wa_from)
     draft = s["draft"]
     state = s["state"]
 
     # comandos globais
-    cmd = incoming.lower()
+    cmd = body.lower()
     if cmd in {"cancelar", "cancel", "cancela", "3"}:
         _reset_draft(s)
         _set_state(s, "MENU")
+        clear_session(wa_from)
         resp = MessagingResponse()
         resp.message("Ok. Proposta cancelada.\n\nDigite:\n1) Iniciar proposta\n2) Continuar proposta")
         return PlainTextResponse(str(resp), media_type="application/xml")
@@ -634,12 +668,15 @@ async def twilio_whatsapp(request: Request):
                     _set_state(s, "CLIENT_EMAIL")
                     resp.message(f"Retomando. Cliente: {draft.get('client_name')}\n\nInforme o email do cliente:")
                 elif not draft.get("selected_keys"):
-                    _set_state(s, "SELECT_ITEMS")
-                    resp.message(_render_catalog_menu())
+                    _set_state(s, "pick_items_list")
+                    save_session(wa_from, "pick_items_list", draft)
+                    wa_send_list_items(wa_from)
+                    resp.message("Selecione os itens na lista acima. Quando terminar, digite: *pronto*")
                 else:
                     k = _next_qty_key(draft)
                     if k:
-                        _set_state(s, "QTY")
+                        _set_state(s, "ask_qty")
+                        save_session(wa_from, "ask_qty", draft)
                         q = f"{quantifier_for_item(k)} {CATALOG[k]['label']}?"
                         resp.message(q)
                     else:
@@ -651,55 +688,74 @@ async def twilio_whatsapp(request: Request):
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     if state == "CLIENT_NAME":
-        if len(incoming) < 2:
+        if len(body) < 2:
             resp.message("Nome muito curto. Informe o nome do cliente/empresa:")
             return PlainTextResponse(str(resp), media_type="application/xml")
-        draft["client_name"] = incoming
+        draft["client_name"] = body
         s["updated_at"] = _now()
         _set_state(s, "CLIENT_EMAIL")
         resp.message("Agora informe o email do cliente:")
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     if state == "CLIENT_EMAIL":
-        if not _is_email(incoming):
+        if not _is_email(body):
             resp.message("Email invalido. Digite novamente (ex.: nome@empresa.com):")
             return PlainTextResponse(str(resp), media_type="application/xml")
-        draft["client_email"] = incoming
+        draft["client_email"] = body
         s["updated_at"] = _now()
-        _set_state(s, "SELECT_ITEMS")
-        resp.message(_render_catalog_menu())
+        _set_state(s, "pick_items_list")
+        save_session(wa_from, "pick_items_list", draft)
+        wa_send_list_items(wa_from)
+        resp.message("Selecione os itens na lista acima. Quando terminar, digite: *pronto*")
         return PlainTextResponse(str(resp), media_type="application/xml")
 
-    if state == "SELECT_ITEMS":
-        numbers = re.findall(r"\d+", incoming)
-        chosen: List[str] = []
-        for n in numbers:
-            idx = int(n)
-            if idx in KEY_BY_INDEX:
-                chosen.append(KEY_BY_INDEX[idx])
-        chosen = list(dict.fromkeys(chosen))  # unique keep order
+    if state == "pick_items_list":
+        if selected:
+            item_key = selected
+            if item_key.isdigit():
+                item_key = KEY_BY_INDEX.get(int(item_key), item_key)
+            if item_key not in CATALOG:
+                resp.message("Item da lista nao reconhecido. Selecione novamente pela lista.")
+                return PlainTextResponse(str(resp), media_type="application/xml")
 
-        if not chosen:
-            resp.message("Nao entendi. Selecione por numeros (ex.: 1,3,8)\n\n" + _render_catalog_menu())
+            draft.setdefault("selected_keys", [])
+            if item_key not in draft["selected_keys"]:
+                draft["selected_keys"].append(item_key)
+            draft.setdefault("quantities", {})
+            s["updated_at"] = _now()
+            _set_state(s, "pick_items_list")
+            save_session(wa_from, "pick_items_list", draft)
+            current = ", ".join(LABEL_BY_KEY.get(x, x) for x in draft["selected_keys"])
+            resp.message(
+                f"Adicionado: *{LABEL_BY_KEY.get(item_key, item_key)}*\n"
+                f"Itens atuais: {current}\n"
+                "Digite *pronto* quando terminar."
+            )
             return PlainTextResponse(str(resp), media_type="application/xml")
 
-        draft["selected_keys"] = chosen
-        draft["quantities"] = {}
-        s["updated_at"] = _now()
-        _set_state(s, "QTY")
-        k = _next_qty_key(draft)
-        q = f"{quantifier_for_item(k)} {CATALOG[k]['label']}?"
-        resp.message(f"Perfeito. {q}")
+        if cmd == "pronto":
+            if not draft.get("selected_keys"):
+                resp.message("Voce ainda nao selecionou itens. Abra a lista e selecione pelo menos 1.")
+                return PlainTextResponse(str(resp), media_type="application/xml")
+            draft["qty_index"] = 0
+            _set_state(s, "ask_qty")
+            save_session(wa_from, "ask_qty", draft)
+            k = draft["selected_keys"][0]
+            q = f"{quantifier_for_item(k)} {CATALOG[k]['label']}?"
+            resp.message(q)
+            return PlainTextResponse(str(resp), media_type="application/xml")
+
+        resp.message("Use a lista para selecionar itens. Depois digite *pronto*.")
         return PlainTextResponse(str(resp), media_type="application/xml")
 
-    if state == "QTY":
+    if state in {"QTY", "ask_qty"}:
         k = _next_qty_key(draft)
         if not k:
             _set_state(s, "SUMMARY")
             resp.message(_summary(draft))
             return PlainTextResponse(str(resp), media_type="application/xml")
 
-        m = re.findall(r"\d+", incoming)
+        m = re.findall(r"\d+", body)
         if not m:
             q = f"{quantifier_for_item(k)} {CATALOG[k]['label']}?"
             resp.message(f"Digite apenas um numero.\n{q}")
@@ -726,8 +782,12 @@ async def twilio_whatsapp(request: Request):
 
     if state == "SUMMARY":
         if cmd in {"editar", "edit", "2"}:
-            _set_state(s, "SELECT_ITEMS")
-            resp.message("Ok. Vamos editar os itens.\n\n" + _render_catalog_menu())
+            draft["selected_keys"] = []
+            draft["quantities"] = {}
+            _set_state(s, "pick_items_list")
+            save_session(wa_from, "pick_items_list", draft)
+            wa_send_list_items(wa_from)
+            resp.message("Ok. Vamos editar os itens.\n\nSelecione os itens na lista acima. Quando terminar, digite: *pronto*")
             return PlainTextResponse(str(resp), media_type="application/xml")
 
         if cmd in {"confirmar", "confirm", "1"}:
@@ -742,7 +802,7 @@ async def twilio_whatsapp(request: Request):
                     items[sku] = items.get(sku, 0) + qty
 
                 payload = FlowSubmit(
-                    seller_phone=seller.replace("whatsapp:", ""),
+                    seller_phone=wa_from.replace("whatsapp:", ""),
                     client=Client(
                         name=draft["client_name"],
                         email=draft["client_email"],
@@ -755,6 +815,7 @@ async def twilio_whatsapp(request: Request):
 
                 _reset_draft(s)
                 _set_state(s, "MENU")
+                clear_session(wa_from)
                 resp.message("Proposta enviada com sucesso para o email do cliente.\n\nDigite:\n1) Iniciar proposta\n2) Continuar proposta")
                 return PlainTextResponse(str(resp), media_type="application/xml")
             except HTTPException as e:
